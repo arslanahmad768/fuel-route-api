@@ -5,14 +5,14 @@ description = "Django API for fuel route optimization"
 authors = [
     { email = "arslanahmaddeve@gmail.com" }
 ]
-requires-python = ">=3.11"
+requires-python = ">=3.12,<3.13"
 dependencies = [
-    "django",
+    "django>=5.2,<6.0",
     "djangorestframework",
     "requests",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
     "pytest",
     "pytest-django",
