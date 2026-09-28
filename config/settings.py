@@ -13,15 +13,33 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 import os
 from pathlib import Path
 
+from django.core.exceptions import ImproperlyConfigured
+from dotenv import load_dotenv
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Load variables from the project-root `.env` (see `.env.example`) before any
+# setting below reads the environment. Variables already set in the real
+# environment win (`override=False`), so an exported value — or the test
+# settings' dummy secret key — is never clobbered by `.env`. A missing
+# `.env` file is silently ignored.
+load_dotenv(BASE_DIR / '.env', override=False)
 
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
+# No baked-in default, by design: refuse to start at all (any manage.py
+# command, runserver, WSGI/ASGI import) rather than failing later on only the
+# request paths that happen to need signing.
 SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY')
+if not SECRET_KEY:
+    raise ImproperlyConfigured(
+        'DJANGO_SECRET_KEY is not set. Copy .env.example to .env and fill it '
+        'in, or export it in the environment.'
+    )
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get('DEBUG', 'True').lower() in ('true', '1', 'yes')
