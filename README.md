@@ -157,6 +157,17 @@ curl -X POST http://localhost:8000/api/v1/route/ \
   -d '{"start": "Chicago, IL", "finish": "Dallas, TX"}'
 ```
 
+The response below is **illustrative and abridged**, not a literal capture
+of a real API call: `route_geometry.coordinates` is truncated to two points
+(a real response has one coordinate pair per point ORS returns along the
+polyline — typically hundreds), and `fuel_stops` shows only one
+representative stop rather than the full sequence a 967.4-mile route would
+actually need (a single 500-mile-range vehicle requires at least two stops
+to cover that distance). Treat `total_fuel_cost`/`total_gallons` as the sum
+over the *complete* `fuel_stops` array a real response would contain, not
+over the single stop shown here — this response body is meant to
+illustrate the shape/field names, not to be arithmetically self-contained.
+
 ```json
 {
   "start": "Chicago, IL",
@@ -165,7 +176,7 @@ curl -X POST http://localhost:8000/api/v1/route/ \
   "duration_hours": 14.6,
   "route_geometry": {
     "type": "LineString",
-    "coordinates": [[-87.6298, 41.8781], [-87.9073, 41.6089], "..."]
+    "coordinates": [[-87.6298, 41.8781], [-87.9073, 41.6089]]
   },
   "fuel_stops": [
     {
