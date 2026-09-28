@@ -78,7 +78,7 @@ optimization itself has to run over ~8,000 candidate fuel stations.
 
 | Choice | Why |
 |---|---|
-| Django 5.2 + DRF | Required by the assignment ("latest stable Django"); DRF gives request validation (serializers) and clean JSON responses for a single-endpoint API without extra machinery. |
+| Django 6.1 + DRF 3.18 | The assignment asks for the latest stable Django; 6.1.1 is the newest release as of this writing (`pyproject.toml` pins `django>=6.1,<6.2`), and DRF 3.18.1 officially supports it. DRF gives request validation (serializers) and clean JSON responses for a single-endpoint API without extra machinery. |
 | SQLite | ~8,000 rows, read-mostly, no concurrent-write concerns — Postgres/PostGIS would be pure overhead for this dataset size. See "Future improvements" for when that changes. |
 | `uv` | Fast, reproducible dependency management with a committed lockfile (`uv.lock`); no need to hand-manage a virtualenv. |
 | OpenRouteService (ORS) | Free tier, no credit card required, returns geometry + distance + duration from a single directions call (see "Routing API choice" below). |
@@ -96,12 +96,15 @@ cp .env.example .env
 
 ### Environment variables
 
-Set in `.env` (see `.env.example`):
+Set in `.env` (see `.env.example`). `config/settings.py` loads the
+project-root `.env` via `python-dotenv` before reading any setting; a
+variable already exported in your shell takes precedence over the `.env`
+value.
 
 | Variable | Required | Notes |
 |---|---|---|
-| `ORS_API_KEY` | Yes, to call ORS | Free key from https://openrouteservice.org/dev/#/signup. Sent as the raw `Authorization` header value (per ORS's convention, not a `Bearer` prefix). |
-| `DJANGO_SECRET_KEY` | Yes, to run the server | `config/settings.py` reads this at import time with no baked-in default — the process fails loudly on startup if it's unset, by design. |
+| `ORS_API_KEY` | Yes, to call ORS | Free key from https://openrouteservice.org/dev/#/signup. Sent as the raw `Authorization` header value (per ORS's convention, not a `Bearer` prefix). If it's missing or wrong, ORS rejects the call and the API answers `502 {"error": "Routing provider is unavailable"}`. |
+| `DJANGO_SECRET_KEY` | Yes, for every command | No baked-in default, by design: if it's unset or empty, `config/settings.py` raises `ImproperlyConfigured` as soon as settings are loaded, so every `manage.py` command (`check`, `migrate`, `import_fuel_prices`, `runserver`, …) refuses to start. |
 | `DEBUG` | No (default `True`) | Set to `False` for anything beyond local development. |
 
 ## Dataset setup
@@ -154,51 +157,76 @@ The API is then available at `http://localhost:8000/api/v1/route/`.
 ```bash
 curl -X POST http://localhost:8000/api/v1/route/ \
   -H "Content-Type: application/json" \
-  -d '{"start": "Chicago, IL", "finish": "Dallas, TX"}'
+  -d '{"start": "Atlanta, GA", "finish": "Washington, DC"}'
 ```
 
-The response below is **illustrative and abridged**, not a literal capture
-of a real API call: `route_geometry.coordinates` is truncated to two points
-(a real response has one coordinate pair per point ORS returns along the
-polyline — typically hundreds), and `fuel_stops` shows only one
-representative stop rather than the full sequence a 967.4-mile route would
-actually need (a single 500-mile-range vehicle requires at least two stops
-to cover that distance). Treat `total_fuel_cost`/`total_gallons` as the sum
-over the *complete* `fuel_stops` array a real response would contain, not
-over the single stop shown here — this response body is meant to
-illustrate the shape/field names, not to be arithmetically self-contained.
+Where this response comes from: it was produced by running the real
+`RouteFuelPlanningService` pipeline (real corridor matching, real optimizer)
+against the real imported `FuelStation` table, with only the ORS directions
+call swapped for a simplified stand-in route — a ~600-point polyline through
+Atlanta → Charlotte → Raleigh → Richmond → Washington (distance = that
+polyline's own length; duration assumes 60 mph). A live ORS road route
+between the same cities is longer and follows different roads, so a live
+call will return different stations and numbers. The only edit to the
+output is that `route_geometry.coordinates` is cut down to its two
+endpoints (a real response has one pair per polyline point, typically
+thousands). Every other number is as computed, and they are consistent with
+each other (worked through below).
 
 ```json
 {
-  "start": "Chicago, IL",
-  "finish": "Dallas, TX",
-  "distance_miles": 967.4,
-  "duration_hours": 14.6,
+  "start": "Atlanta, GA",
+  "finish": "Washington, DC",
+  "distance_miles": 591.6,
+  "duration_hours": 9.9,
   "route_geometry": {
     "type": "LineString",
-    "coordinates": [[-87.6298, 41.8781], [-87.9073, 41.6089]]
+    "coordinates": [[-84.388, 33.749], [-77.0369, 38.9072]]
   },
   "fuel_stops": [
     {
-      "station_name": "PILOT TRAVEL CENTER #1243",
-      "city": "Gila Bend",
-      "state": "AZ",
-      "distance_from_origin_miles": 210.3,
-      "price_per_gallon": 3.154,
-      "gallons_purchased": 21.03,
-      "cost": 66.33
+      "station_name": "SPEEDWAY #6973",
+      "city": "Wake Forest",
+      "state": "NC",
+      "distance_from_origin_miles": 371.5,
+      "price_per_gallon": 2.949,
+      "gallons_purchased": 9.16,
+      "cost": 27.01
     }
   ],
-  "total_fuel_cost": 271.4,
-  "total_gallons": 96.74
+  "total_fuel_cost": 27.01,
+  "total_gallons": 9.16
 }
 ```
+
+The arithmetic, under the fuel model (starts with a full 500-mile tank,
+10 MPG, no reserve needed at the destination):
+
+```text
+Trip length 591.6 mi > 500 mi range, so at least (591.6 - 500) = 91.6 mi
+of fuel must be bought en route. Here one stop covers all of it:
+
+Stop at mile 371.5 (Wake Forest, NC; $2.949/gal):
+  reachable on the starting tank:  371.5 <= 500
+  fuel on arrival:                 500 - 371.5   = 128.5 mi
+  still to drive:                  591.6 - 371.5 = 220.1 mi  (<= 500, so no second stop)
+  buy the shortfall only:          220.1 - 128.5 = 91.6 mi = 91.6 / 10 = 9.16 gal
+  cost:                            9.16 x 2.949  = 27.01284 -> $27.01 (to the cent, half-up)
+
+total_gallons   = 9.16   (= (591.6 - 500) / 10)
+total_fuel_cost = 27.01  (single stop)
+```
+
+Why only a top-up and not a full tank: nothing reachable further along the
+route is priced below this stop's, and the destination is within range
+after the top-up, so the optimizer buys exactly the shortfall (step 4 in
+"Algorithm, in plain language" below).
 
 Coordinates are also accepted directly (skips the geocoding call), and take
 precedence if both shapes are supplied in the same request:
 
 ```json
-{"start_lat": 41.8781, "start_lng": -87.6298, "finish_lat": 32.7767, "finish_lng": -96.797}
+{"start_lat": 33.749, "start_lng": -84.388, "finish_lat": 38.9072, "finish_lng": -77.0369}
 ```
 
 `start`/`finish` in the response echo back whatever the request supplied —
@@ -211,7 +239,7 @@ were given.
 |---|---|---|
 | Serializer validation failure (missing/invalid fields) | 400 | DRF default `{"field": ["msg"]}` |
 | Free-text location not resolvable | 400 | `{"error": "Could not resolve location: <value>"}` |
-| Routing API failure/timeout | 502 | `{"error": "Routing provider is unavailable"}` |
+| Routing API failure/timeout, or a malformed ORS response | 502 | `{"error": "Routing provider is unavailable"}` |
 | Routing API rate-limited (ORS HTTP 429) | 503 | `{"error": "Routing provider rate limit exceeded"}` |
 | No feasible fuel stop plan (a gap between stations exceeds the vehicle's range) | 422 | `{"error": "No feasible fuel stop plan: gap of <miles> miles near mile <x> exceeds vehicle range"}` |
 | Anything unexpected | 500 | `{"error": "Internal server error"}` (traceback goes to server logs only, never the response body) |
@@ -222,8 +250,10 @@ were given.
 uv run pytest
 ```
 
-62 tests currently pass, covering the model, the import command, the
-routing client (via `responses`-mocked HTTP), route corridor matching, the
+89 tests currently pass, covering settings loading, the model, the import
+command, the routing client (via `responses`-mocked HTTP, including
+malformed 200 responses), route corridor matching (including exact
+equivalence with a brute-force scan and a dense-polyline speed guard), the
 fuel optimizer (including the four hand-worked counterexamples that pinned
 down the algorithm's edge cases), the API view, and end-to-end error
 handling.
@@ -232,9 +262,9 @@ One quirk worth knowing: `pyproject.toml` points `pytest`'s
 `DJANGO_SETTINGS_MODULE` at `config.settings_test`, a thin wrapper around
 `config.settings` that just seeds a safe dummy `DJANGO_SECRET_KEY` before
 Django's settings module is imported. This exists only so the suite passes
-in a clean shell with no `.env` sourced — `config/settings.py` itself still
-has no fallback secret key and fails loudly if one isn't set outside of
-tests. `config/settings_test.py` has a longer comment explaining exactly why
+in a clean shell with no `.env` present — `config/settings.py` itself still
+has no fallback secret key and raises `ImproperlyConfigured` at settings
+load if one isn't set outside of tests. `config/settings_test.py` has a longer comment explaining exactly why
 a `conftest.py` can't achieve the same thing (import-order reasons specific
 to pytest-django).
 
@@ -314,12 +344,21 @@ by construction.
 ## Performance notes
 
 - Route corridor matching does a coarse bounding-box prefilter at the ORM
-  level (indexed on `latitude`/`longitude`) before running per-segment
-  distance math in Python, so the expensive part only runs over stations
-  plausibly near the route, not all ~8,000.
+  level (indexed on `latitude`/`longitude`), which for a long route still
+  leaves 1,000-2,500 candidate stations. Real ORS polylines have thousands
+  of points, so testing every candidate against every segment would be tens
+  of millions of haversine evaluations (measured: ~54 s for a 10,000-point
+  Chicago→Houston-style polyline against the real dataset). Instead, route
+  segments are bucketed into a ~0.05° spatial grid once per request, and
+  each station is only tested against the segments registered in its own
+  grid cell, after a cheap bounding-box rejection. Both filters are
+  provably conservative (they only skip segments farther than the 2-mile
+  buffer), so results are identical to the exhaustive scan — the test suite
+  checks this against a brute-force oracle — and the same case now takes
+  ~0.15 s. A regression test pins a 10,000-point / 1,600-station case under
+  2 s.
 - The whole per-request pipeline (routing call aside) is in-memory list/dict
-  work over at most a few hundred corridor-matched stations — no N+1 query
-  patterns, no per-station database round-trips.
+  work — no N+1 query patterns, no per-station database round-trips.
 - The dominant cost per request is the single ORS directions HTTP call
   (network-bound, not computation-bound).
 
