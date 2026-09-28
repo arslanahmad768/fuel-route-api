@@ -13,7 +13,7 @@ from fuelroute.models import FuelStation
 FUEL_PRICES_CSV = """OPIS Truckstop ID,Truckstop Name,Address,City,State,Rack ID,Retail Price
 100,PILOT TRAVEL CENTER,"I-40, EXIT 1 & SR-1",Springfield,MO,101,3.100000
 200,LOVES TRAVEL STOP,"I-90, EXIT 200 & CA-12",Reno,NV,201,3.500000
-200,LOVES TRAVEL STOP,"I-90, EXIT 200 & CA-12",Reno,NV,201,3.200000
+200,LOVE'S #200,"I-90, EXIT 200 & CA-12",Reno,NV,201,3.200000
 300,FLYING J,"I-10, EXIT 5 & TX-1",Unknown City,TX,301,2.999000
 400,PETRO CANADA,"HWY 401, EXIT 50",Toronto,ON,401,1.200000
 500,DUP STATION,"I-70, EXIT 10 & CO-5",Denver,CO,501,3.750000
@@ -65,8 +65,11 @@ class TestImportFuelPricesCommand:
         # Canadian row dropped entirely.
         assert not FuelStation.objects.filter(opis_id=400).exists()
 
-        # OPIS-id group with differing prices: min price wins, first-seen
-        # name kept.
+        # OPIS-id group with differing prices AND differing names: min
+        # price wins (from the second, cheaper row), but the name must
+        # come from the *first* row in file order ("LOVES TRAVEL STOP"),
+        # not the second ("LOVE'S #200") or the cheaper row's name — this
+        # would fail if the collapsing logic picked the wrong row's name.
         station_200 = FuelStation.objects.get(opis_id=200)
         assert station_200.retail_price == Decimal("3.200000")
         assert station_200.name == "LOVES TRAVEL STOP"

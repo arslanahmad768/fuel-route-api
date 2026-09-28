@@ -10,6 +10,7 @@ Usage:
         [--geocode-cache data/city_geocode_cache.csv]
 """
 
+import argparse
 import csv
 from decimal import Decimal, InvalidOperation
 
@@ -31,7 +32,7 @@ class Command(BaseCommand):
         "duplicating them."
     )
 
-    def add_arguments(self, parser):
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument(
             "--csv-path",
             default=DEFAULT_CSV_PATH,
@@ -46,7 +47,7 @@ class Command(BaseCommand):
             ),
         )
 
-    def handle(self, *args, **options):
+    def handle(self, *args: object, **options: object) -> None:
         csv_path = options["csv_path"]
         geocode_cache_path = options["geocode_cache"]
 
