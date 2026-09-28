@@ -16,6 +16,7 @@ distance math follow the more conventional `(latitude, longitude)` order.
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 
 from django.db.models import QuerySet
 
@@ -152,20 +153,137 @@ def find_candidate_stations(
     )
 
 
+# Side length (degrees) of the spatial grid used to bucket route segments.
+# ~0.05 deg is ~3.5 mi of latitude: comparable to the corridor width, so a
+# station's cell only ever holds the handful of segments actually near it.
+GRID_CELL_DEGREES = 0.05
+
+# Safety factor applied to the corridor buffer when expanding segment
+# bounding boxes. The degrees-per-mile conversion below is a strict lower
+# bound on haversine distance to within ~0.1% at corridor scale, so 1.25 is
+# a very generous margin: a segment is only ever skipped if it is provably
+# farther than the buffer.
+_BBOX_SAFETY_FACTOR = 1.25
+
+_MILES_PER_DEGREE = EARTH_RADIUS_MILES * math.pi / 180.0
+
+
+def _expanded_bbox(
+    lat_a: float, lon_a: float, lat_b: float, lon_b: float, buffer_miles: float
+) -> tuple[float, float, float, float]:
+    """Axis-aligned (lat, lon) box around a segment, expanded conservatively.
+
+    Any point whose haversine distance to *some point on the segment* is at
+    most `buffer_miles` is guaranteed to lie inside the returned box:
+
+    * latitude: `d >= R * |dlat|` (in radians, up to a negligible sine
+      correction), so `|dlat| <= buffer / miles_per_degree`;
+    * longitude: `d >= R * sqrt(cos(lat1) * cos(lat2)) * |dlon|`, and both
+      latitudes are no more extreme than the box's own (already
+      lat-expanded) latitude bounds, so dividing by the cosine of the most
+      extreme latitude is a safe bound.
+
+    Returns (min_lat, max_lat, min_lon, max_lon).
+    """
+    lat_margin = _BBOX_SAFETY_FACTOR * buffer_miles / _MILES_PER_DEGREE
+    min_lat = min(lat_a, lat_b) - lat_margin
+    max_lat = max(lat_a, lat_b) + lat_margin
+    extreme_lat = min(89.0, max(abs(min_lat), abs(max_lat)))
+    lon_margin = lat_margin / math.cos(math.radians(extreme_lat))
+    return (
+        min_lat,
+        max_lat,
+        min(lon_a, lon_b) - lon_margin,
+        max(lon_a, lon_b) + lon_margin,
+    )
+
+
+def _cell_of(lat: float, lon: float) -> tuple[int, int]:
+    return (math.floor(lat / GRID_CELL_DEGREES), math.floor(lon / GRID_CELL_DEGREES))
+
+
+def _build_segment_grid(
+    route_points: list[tuple[float, float]], buffer_miles: float
+) -> tuple[dict[tuple[int, int], list[int]], list[tuple[float, float, float, float]]]:
+    """Bucket route segments into grid cells for fast nearby-segment lookup.
+
+    Returns `(grid, segment_boxes)`: `grid` maps a cell to the ascending list
+    of segment indices whose buffer-expanded footprint touches that cell, and
+    `segment_boxes[i]` is segment `i`'s expanded bounding box (used as a cheap
+    per-segment pre-check).
+
+    Correctness guarantee: if a station is within `buffer_miles` of segment
+    `i`, then `i` is in the station's own cell's list. Long segments (sparse
+    geometry) are split into sub-pieces no longer than one cell per axis
+    before being expanded and registered, so a long diagonal segment only
+    touches the cells along its path, not its whole bounding rectangle.
+    """
+    grid: dict[tuple[int, int], list[int]] = {}
+    segment_boxes: list[tuple[float, float, float, float]] = []
+
+    for i in range(len(route_points) - 1):
+        lat1, lon1 = route_points[i]
+        lat2, lon2 = route_points[i + 1]
+        segment_boxes.append(_expanded_bbox(lat1, lon1, lat2, lon2, buffer_miles))
+
+        # Split into `pieces` equal sub-pieces, each spanning at most one grid
+        # cell in each axis. Every point on the segment lies on (and hence in
+        # the bounding box of) some sub-piece.
+        span = max(abs(lat2 - lat1), abs(lon2 - lon1))
+        pieces = max(1, math.ceil(span / GRID_CELL_DEGREES))
+        cells: set[tuple[int, int]] = set()
+        prev_lat, prev_lon = lat1, lon1
+        for k in range(1, pieces + 1):
+            if k == pieces:
+                next_lat, next_lon = lat2, lon2
+            else:
+                frac = k / pieces
+                next_lat = lat1 + (lat2 - lat1) * frac
+                next_lon = lon1 + (lon2 - lon1) * frac
+            b_min_lat, b_max_lat, b_min_lon, b_max_lon = _expanded_bbox(
+                prev_lat, prev_lon, next_lat, next_lon, buffer_miles
+            )
+            row_lo, col_lo = _cell_of(b_min_lat, b_min_lon)
+            row_hi, col_hi = _cell_of(b_max_lat, b_max_lon)
+            for row in range(row_lo, row_hi + 1):
+                for col in range(col_lo, col_hi + 1):
+                    cells.add((row, col))
+            prev_lat, prev_lon = next_lat, next_lon
+
+        # Segments are visited in ascending index order, and each is added
+        # at most once per cell, so every cell's list stays sorted ascending.
+        for cell in cells:
+            grid.setdefault(cell, []).append(i)
+
+    return grid, segment_boxes
+
+
 def project_stations_onto_route(
-    candidate_stations,
+    candidate_stations: Iterable[FuelStation],
     route_coordinates: list[tuple[float, float]],
 ) -> list[dict]:
     """Project candidate stations onto the route and filter to the corridor.
 
     `route_coordinates` is a list of `(longitude, latitude)` pairs (GeoJSON
-    convention). For each station, finds the nearest route segment (looping
-    over consecutive coordinate pairs), computes the perpendicular distance
-    to it, and keeps only stations within `ROUTE_CORRIDOR_BUFFER_MILES`.
+    convention). For each station, finds the nearest route segment, computes
+    the perpendicular distance to it, and keeps only stations within
+    `ROUTE_CORRIDOR_BUFFER_MILES`.
 
     `distance_from_origin_miles` is the cumulative route length up to the
     nearest segment's start point, plus the station's projected offset
     along that segment.
+
+    Performance: real ORS polylines have thousands of points, so testing
+    every station against every segment is far too slow. Segments are first
+    bucketed into a coarse spatial grid (`_build_segment_grid`); each station
+    is only tested against the segments registered in its own grid cell, and
+    each of those is first rejected by a cheap bounding-box check before any
+    projection/haversine math runs. Both filters are conservative — they only
+    ever skip segments provably farther than the corridor buffer — and the
+    surviving segments are visited in ascending index order with the same
+    strict `<` comparison, so the matched set, the chosen nearest segment
+    (including ties) and the computed distances are identical to the
+    exhaustive all-segments scan.
 
     Returns a list of `{"station": station_obj, "distance_from_origin_miles":
     float}` dicts, sorted ascending by that distance.
@@ -181,15 +299,26 @@ def project_stations_onto_route(
             cumulative_distances[-1] + haversine_miles(prev[0], prev[1], curr[0], curr[1])
         )
 
+    grid, segment_boxes = _build_segment_grid(route_points, ROUTE_CORRIDOR_BUFFER_MILES)
+
     results = []
 
     for station in candidate_stations:
         station_point = (float(station.latitude), float(station.longitude))
+        station_lat, station_lon = station_point
 
         best_distance = None
         best_offset_from_origin = None
 
-        for i in range(len(route_points) - 1):
+        for i in grid.get(_cell_of(station_lat, station_lon), ()):
+            min_lat, max_lat, min_lon, max_lon = segment_boxes[i]
+            if not (
+                min_lat <= station_lat <= max_lat and min_lon <= station_lon <= max_lon
+            ):
+                # Provably farther than the corridor buffer: cannot be the
+                # nearest segment of a station that ends up being kept.
+                continue
+
             seg_start = route_points[i]
             seg_end = route_points[i + 1]
 

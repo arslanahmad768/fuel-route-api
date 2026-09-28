@@ -3,6 +3,8 @@ Unit tests for the route corridor matching service.
 """
 
 import math
+import random
+import time
 from decimal import Decimal
 
 import pytest
@@ -10,6 +12,7 @@ import pytest
 from fuelroute.constants import EARTH_RADIUS_MILES, ROUTE_CORRIDOR_BUFFER_MILES
 from fuelroute.models import FuelStation
 from fuelroute.services.route_matching import (
+    _nearest_point_on_segment,
     bounding_box,
     find_candidate_stations,
     haversine_miles,
@@ -189,3 +192,140 @@ class TestProjectStationsOntoRoute:
 
         assert len(results) == 1
         assert results[0]["station"] == station
+
+
+def _exhaustive_reference_projection(stations, route_coordinates):
+    """Brute-force all-segments scan: the pre-optimization algorithm, verbatim.
+
+    Kept here as an oracle so the grid-accelerated implementation can be
+    checked for *identical* output (same stations, same order, same float
+    distances), not merely "close enough".
+    """
+    route_points = [(lat, lon) for lon, lat in route_coordinates]
+    cumulative = [0.0]
+    for i in range(1, len(route_points)):
+        (a_lat, a_lon), (b_lat, b_lon) = route_points[i - 1], route_points[i]
+        cumulative.append(cumulative[-1] + haversine_miles(a_lat, a_lon, b_lat, b_lon))
+
+    results = []
+    for station in stations:
+        point = (float(station.latitude), float(station.longitude))
+        best_distance = None
+        best_offset = None
+        for i in range(len(route_points) - 1):
+            seg_start, seg_end = route_points[i], route_points[i + 1]
+            nearest = _nearest_point_on_segment(point, seg_start, seg_end)
+            distance = haversine_miles(point[0], point[1], nearest[0], nearest[1])
+            if best_distance is None or distance < best_distance:
+                best_distance = distance
+                best_offset = cumulative[i] + haversine_miles(
+                    seg_start[0], seg_start[1], nearest[0], nearest[1]
+                )
+        if best_distance is not None and best_distance <= ROUTE_CORRIDOR_BUFFER_MILES:
+            results.append({"station": station, "distance_from_origin_miles": best_offset})
+    results.sort(key=lambda r: r["distance_from_origin_miles"])
+    return results
+
+
+def _dense_route(waypoints, n_points, jitter_degrees, seed):
+    """Build an ORS-style dense (lon, lat) polyline through `waypoints`."""
+    rng = random.Random(seed)
+    per_leg = n_points // (len(waypoints) - 1)
+    coords = []
+    for (a_lat, a_lon), (b_lat, b_lon) in zip(waypoints, waypoints[1:]):
+        for k in range(per_leg):
+            f = k / per_leg
+            coords.append(
+                (
+                    a_lon + (b_lon - a_lon) * f + rng.uniform(-jitter_degrees, jitter_degrees),
+                    a_lat + (b_lat - a_lat) * f + rng.uniform(-jitter_degrees, jitter_degrees),
+                )
+            )
+    coords.append((waypoints[-1][1], waypoints[-1][0]))
+    return coords
+
+
+def _stations_near_route(route_coordinates, count, max_offset_miles, seed):
+    """Unsaved FuelStation instances scattered around the route.
+
+    Offsets are drawn up to `max_offset_miles` from random route vertices,
+    deliberately straddling the 2-mile corridor boundary so that both the
+    kept and rejected sides of the filter get exercised.
+    """
+    rng = random.Random(seed)
+    stations = []
+    for opis_id in range(count):
+        lon, lat = rng.choice(route_coordinates)
+        bearing = rng.uniform(0, 2 * math.pi)
+        miles = rng.uniform(0, max_offset_miles)
+        d_lat = miles * math.cos(bearing) / MILES_PER_DEGREE_LAT
+        d_lon = miles * math.sin(bearing) / MILES_PER_DEGREE_LAT / math.cos(math.radians(lat))
+        stations.append(
+            FuelStation(
+                opis_id=opis_id,
+                name=f"S{opis_id}",
+                retail_price=Decimal("3.500"),
+                latitude=Decimal(f"{lat + d_lat:.6f}"),
+                longitude=Decimal(f"{lon + d_lon:.6f}"),
+            )
+        )
+    return stations
+
+
+def _key(results):
+    return [(r["station"].opis_id, r["distance_from_origin_miles"]) for r in results]
+
+
+# Roughly Chicago -> St. Louis -> Memphis -> Little Rock -> Dallas -> Houston.
+CHICAGO_TO_HOUSTON_WAYPOINTS = [
+    (41.8781, -87.6298),
+    (38.6270, -90.1994),
+    (35.1495, -90.0490),
+    (34.7465, -92.2896),
+    (32.7767, -96.7970),
+    (29.7604, -95.3698),
+]
+
+
+class TestProjectStationsOntoRouteAcceleration:
+    """The spatial grid must be a pure speed-up, never a behavior change."""
+
+    @pytest.mark.parametrize("seed", [1, 2, 3])
+    def test_matches_exhaustive_scan_exactly_on_dense_route(self, seed):
+        # Kept modest: the brute-force oracle is itself the slow algorithm.
+        route = _dense_route(CHICAGO_TO_HOUSTON_WAYPOINTS, 800, 0.01, seed=seed)
+        stations = _stations_near_route(route, 300, max_offset_miles=4.0, seed=seed)
+
+        got = project_stations_onto_route(stations, route)
+        want = _exhaustive_reference_projection(stations, route)
+
+        assert want  # sanity: the scenario actually keeps some stations
+        assert len(want) < len(stations)  # ...and rejects some
+        assert _key(got) == _key(want)
+
+    def test_matches_exhaustive_scan_exactly_on_sparse_long_segments(self):
+        # Waypoints only: segments hundreds of miles long, spanning many grid
+        # cells each, exercising the long-segment splitting path.
+        route = [(lon, lat) for lat, lon in CHICAGO_TO_HOUSTON_WAYPOINTS]
+        sampling_points = _dense_route(CHICAGO_TO_HOUSTON_WAYPOINTS, 3000, 0.0, seed=0)
+        stations = _stations_near_route(sampling_points, 400, max_offset_miles=4.0, seed=7)
+
+        got = project_stations_onto_route(stations, route)
+        want = _exhaustive_reference_projection(stations, route)
+
+        assert want
+        assert len(want) < len(stations)
+        assert _key(got) == _key(want)
+
+    def test_dense_polyline_with_many_candidates_is_fast(self):
+        # Regression guard: real ORS polylines have thousands of points, and
+        # the old all-segments scan took tens of seconds to minutes here.
+        route = _dense_route(CHICAGO_TO_HOUSTON_WAYPOINTS, 10_000, 0.01, seed=42)
+        stations = _stations_near_route(route, 1_600, max_offset_miles=30.0, seed=42)
+
+        started = time.perf_counter()
+        results = project_stations_onto_route(stations, route)
+        elapsed = time.perf_counter() - started
+
+        assert results  # did real work, not a trivially empty run
+        assert elapsed < 2.0, f"corridor matching took {elapsed:.2f}s"
