@@ -155,12 +155,12 @@ def find_candidate_stations(
 
 # Side length (degrees) of the spatial grid used to bucket route segments.
 # ~0.05 deg is ~3.5 mi of latitude: comparable to the corridor width, so a
-# station's cell only ever holds the handful of segments actually near it.
+# station's cell only holds segments that are genuinely near it.
 GRID_CELL_DEGREES = 0.05
 
 # Safety factor applied to the corridor buffer when expanding segment
-# bounding boxes. The degrees-per-mile conversion below is a strict lower
-# bound on haversine distance to within ~0.1% at corridor scale, so 1.25 is
+# bounding boxes. The miles-to-degrees bounds in `_expanded_bbox` are exact
+# up to a sine-vs-angle correction far below 0.1% at a few miles, so 1.25 is
 # a very generous margin: a segment is only ever skipped if it is provably
 # farther than the buffer.
 _BBOX_SAFETY_FACTOR = 1.25
@@ -176,12 +176,18 @@ def _expanded_bbox(
     Any point whose haversine distance to *some point on the segment* is at
     most `buffer_miles` is guaranteed to lie inside the returned box:
 
-    * latitude: `d >= R * |dlat|` (in radians, up to a negligible sine
-      correction), so `|dlat| <= buffer / miles_per_degree`;
-    * longitude: `d >= R * sqrt(cos(lat1) * cos(lat2)) * |dlon|`, and both
-      latitudes are no more extreme than the box's own (already
-      lat-expanded) latitude bounds, so dividing by the cosine of the most
-      extreme latitude is a safe bound.
+    * latitude: from the haversine formula, `d >= 2R * |sin(dlat / 2)|`,
+      i.e. `d >= R * |dlat|` (radians) up to a negligible sine correction,
+      so `|dlat| <= buffer / miles_per_degree`;
+    * longitude: likewise `d >= 2R * sqrt(cos(lat1) * cos(lat2)) *
+      |sin(dlon / 2)|`, and both latitudes are no more extreme than the
+      box's own (already lat-expanded) latitude bounds, so dividing the
+      latitude margin by the cosine of the most extreme latitude is safe.
+
+    `_BBOX_SAFETY_FACTOR` covers the sine corrections with a wide margin.
+    The nearest point `_nearest_point_on_segment` returns always lies on the
+    straight (lat, lon) segment (a clamped linear interpolation), which is
+    what makes "distance to some point on the segment" the right premise.
 
     Returns (min_lat, max_lat, min_lon, max_lon).
     """
