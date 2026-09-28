@@ -50,11 +50,13 @@ class InfeasiblePlanError(Exception):
         )
 
 
-def _purchase(station, distance: float, miles: float) -> FuelStop | None:
+def _purchase(station: Any, distance: float, miles: float) -> FuelStop | None:
     """Build a FuelStop for buying `miles` of range at `station`, or None if 0."""
     if miles <= 0:
         return None
     gallons = Decimal(str(miles / VEHICLE_MPG)).quantize(CENTS, rounding=ROUND_HALF_UP)
+    # Intentional: float leftovers under 0.05 mi round to 0.00 gal and are
+    # dropped rather than reported as a $0.00 stop.
     if gallons <= 0:
         return None
     cost = (gallons * station.retail_price).quantize(CENTS, rounding=ROUND_HALF_UP)
@@ -79,7 +81,14 @@ def plan_fuel_stops(candidates: list[dict], route_distance_miles: float) -> list
             for c in candidates
             if 0 < c["distance_from_origin_miles"] <= route_distance_miles
         ),
-        key=lambda c: c["distance_from_origin_miles"],
+        # Tie-break equal distances by price then opis_id: city-level geocoding
+        # gives every station in a city the same distance, and step 2's "first
+        # strictly cheaper" scan must see the cheapest of them first.
+        key=lambda c: (
+            c["distance_from_origin_miles"],
+            c["station"].retail_price,
+            c["station"].opis_id,
+        ),
     )
 
     pos = 0.0

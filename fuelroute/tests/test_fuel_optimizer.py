@@ -289,3 +289,39 @@ def test_gallons_and_cost_are_quantized_half_up():
     assert isinstance(stops[0], FuelStop)
     assert stops[0].gallons_purchased == Decimal("2.35")
     assert stops[0].cost == Decimal("7.83")
+
+
+def test_rounding_is_half_up_not_half_even():
+    # Route 523.25; @100 $2.500. Arrive fuel 400, need 423.25 -> buy 23.25 mi
+    # = 2.325 gal -> HALF_UP 2.33 (HALF_EVEN would give 2.32).
+    # Cost 2.33 x 2.500 = 5.825 -> HALF_UP 5.83 (HALF_EVEN would give 5.82).
+    stops = plan_fuel_stops([cand(1, 100, "2.500")], 523.25)
+    assert stops[0].gallons_purchased == Decimal("2.33")
+    assert stops[0].cost == Decimal("5.83")
+
+
+# --- Regression: stations sharing a distance (city-level geocoding) ----------
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_same_distance_stations_cheapest_wins_regardless_of_order(reverse):
+    # Route 550; @100 $4.00 (1) and @100 $3.00 (2). Correct: treat @100 $3.00
+    # as the station reached. Arrive fuel 400, remaining 450 -> buy 50 mi =
+    # 5.00 gal x 3.00 = $15.00 (the bug bought at $4.00 = $20.00).
+    candidates = [cand(1, 100, "4.00"), cand(2, 100, "3.00")]
+    if reverse:
+        candidates.reverse()
+    stops = plan_fuel_stops(candidates, 550.0)
+    assert summary(stops) == [(2, 100.0, Decimal("5.00"), Decimal("15.00"))]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_same_distance_cheaper_target_regardless_of_order(reverse):
+    # Route 800; @100 $5 (1), @300 $4 (2), @300 $3 (3).
+    # Origin -> @100 (fuel 400). At @100: first strictly cheaper by
+    # (distance, price) is @300 $3 (3); leg 200 -> buy 0, fuel 200. At @300:
+    # remaining 500 -> buy 300 mi = 30.00 gal x 3.00 = $90.00 (bug: $120.00).
+    candidates = [cand(1, 100, "5.00"), cand(2, 300, "4.00"), cand(3, 300, "3.00")]
+    if reverse:
+        candidates.reverse()
+    stops = plan_fuel_stops(candidates, 800.0)
+    assert summary(stops) == [(3, 300.0, Decimal("30.00"), Decimal("90.00"))]
