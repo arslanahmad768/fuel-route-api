@@ -12,6 +12,8 @@ shape documentation/validation.
 
 from __future__ import annotations
 
+from typing import Any
+
 from rest_framework import serializers
 
 
@@ -23,7 +25,7 @@ class RouteRequestSerializer(serializers.Serializer):
     finish_lat = serializers.FloatField(required=False)
     finish_lng = serializers.FloatField(required=False)
 
-    def validate(self, data):
+    def validate(self, data: dict[str, Any]) -> dict[str, Any]:
         has_text = bool(data.get("start")) and bool(data.get("finish"))
         has_coords = all(
             data.get(field) is not None

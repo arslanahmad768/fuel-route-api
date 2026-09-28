@@ -1,5 +1,7 @@
 import logging
+from typing import Any
 
+from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -18,7 +20,7 @@ logger = logging.getLogger(__name__)
 class RouteView(APIView):
     """POST /api/v1/route/ — resolve a route and its optimal fuel stops."""
 
-    def post(self, request, *args, **kwargs):
+    def post(self, request: Request, *args: Any, **kwargs: Any) -> Response:
         serializer = RouteRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
