@@ -28,5 +28,5 @@ class FuelStation(models.Model):
             models.Index(fields=["state"]),
         ]
 
-    def __str__(self):
+    def __str__(self) -> str:
         return f"{self.name} ({self.city}, {self.state})"
