@@ -10,12 +10,15 @@ anything about ORS or `requests`.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import requests
 from django.conf import settings
 
 from fuelroute.constants import METERS_PER_MILE
+
+logger = logging.getLogger(__name__)
 
 ORS_BASE_URL = "https://api.openrouteservice.org"
 REQUEST_TIMEOUT_SECONDS = 10
@@ -61,6 +64,8 @@ def geocode(query: str) -> tuple[float, float]:
     url = f"{ORS_BASE_URL}/geocode/search"
     params = {"text": query, "size": 1, "boundary.country": "US"}
 
+    logger.info("Calling ORS geocode for query=%r", query)
+
     try:
         response = requests.get(
             url,
@@ -69,17 +74,29 @@ def geocode(query: str) -> tuple[float, float]:
             timeout=REQUEST_TIMEOUT_SECONDS,
         )
     except requests.exceptions.RequestException as exc:
+        logger.info("ORS geocode request failed: %s", exc)
         raise RoutingUnavailable(f"Network error contacting ORS geocode: {exc}") from exc
 
     if response.status_code == 429:
+        logger.info("ORS geocode rate limited (429) for query=%r", query)
         raise RoutingRateLimited("ORS rate limit exceeded for geocode request")
 
     if response.status_code >= 500:
+        logger.info(
+            "ORS geocode returned server error %s for query=%r",
+            response.status_code,
+            query,
+        )
         raise RoutingUnavailable(
             f"ORS geocode returned server error {response.status_code}"
         )
 
     if response.status_code != 200:
+        logger.info(
+            "ORS geocode returned unexpected status %s for query=%r",
+            response.status_code,
+            query,
+        )
         raise RoutingUnavailable(
             f"ORS geocode returned unexpected status {response.status_code}: {response.text}"
         )
@@ -87,9 +104,11 @@ def geocode(query: str) -> tuple[float, float]:
     data = response.json()
     features = data.get("features", [])
     if not features:
+        logger.info("ORS geocode found no results for query=%r", query)
         raise LocationNotFound(f"No geocoding results for query: {query!r}")
 
     lon, lat = features[0]["geometry"]["coordinates"]
+    logger.info("ORS geocode succeeded for query=%r -> (%s, %s)", query, lat, lon)
     return (lat, lon)
 
 
@@ -116,6 +135,8 @@ def get_route(
         ]
     }
 
+    logger.info("Calling ORS directions from %s to %s", start, finish)
+
     try:
         response = requests.post(
             url,
@@ -124,17 +145,21 @@ def get_route(
             timeout=REQUEST_TIMEOUT_SECONDS,
         )
     except requests.exceptions.RequestException as exc:
+        logger.info("ORS directions request failed: %s", exc)
         raise RoutingUnavailable(f"Network error contacting ORS directions: {exc}") from exc
 
     if response.status_code == 429:
+        logger.info("ORS directions rate limited (429)")
         raise RoutingRateLimited("ORS rate limit exceeded for directions request")
 
     if response.status_code >= 500:
+        logger.info("ORS directions returned server error %s", response.status_code)
         raise RoutingUnavailable(
             f"ORS directions returned server error {response.status_code}"
         )
 
     if response.status_code != 200:
+        logger.info("ORS directions returned unexpected status %s", response.status_code)
         raise RoutingUnavailable(
             f"ORS directions returned unexpected status {response.status_code}: {response.text}"
         )
@@ -146,8 +171,14 @@ def get_route(
     duration_seconds = summary["duration"]
     geometry = feature["geometry"]
 
-    return RouteResult(
+    result = RouteResult(
         distance_miles=distance_meters / METERS_PER_MILE,
         duration_hours=duration_seconds / 3600,
         geometry=geometry,
     )
+    logger.info(
+        "ORS directions succeeded: distance_miles=%.1f duration_hours=%.1f",
+        result.distance_miles,
+        result.duration_hours,
+    )
+    return result

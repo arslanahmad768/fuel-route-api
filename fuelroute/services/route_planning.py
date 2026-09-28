@@ -10,11 +10,14 @@ sequences the calls, and assembles the output shape.
 
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 
 from fuelroute.constants import ROUTE_CORRIDOR_BUFFER_MILES
 from fuelroute.services import fuel_optimizer, route_matching, routing_client
 from fuelroute.services.routing_client import LocationNotFound
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_endpoint(
@@ -81,6 +84,12 @@ class RouteFuelPlanningService:
 
         total_fuel_cost = sum((stop.cost for stop in fuel_stops), Decimal("0"))
         total_gallons = sum((stop.gallons_purchased for stop in fuel_stops), Decimal("0"))
+
+        logger.info(
+            "Fuel optimizer produced %d stop(s), total_fuel_cost=%s",
+            len(fuel_stops),
+            total_fuel_cost,
+        )
 
         return {
             "start": start_label,
