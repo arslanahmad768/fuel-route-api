@@ -1,0 +1,29 @@
+[project]
+name = "fuel-route-api"
+version = "0.1.0"
+description = "Django API for fuel route optimization"
+readme = "README.md"
+authors = [
+    { email = "arslanahmaddeve@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "django",
+    "djangorestframework",
+    "requests",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-django",
+    "responses",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.13,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "config.settings"
+testpaths = ["."]
