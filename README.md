@@ -1,7 +1,7 @@
 # Fuel Route API
 
 A Django REST API that, given a start and finish location in the USA, returns
-the driving route plus a cost-optimal set of fuel stops — computed against a
+the driving route plus a cost-optimal set of fuel stops computed against a
 real fuel-price dataset, subject to a vehicle with a 500-mile range and 10
 MPG efficiency.
 
@@ -15,8 +15,8 @@ lat/lng coordinates), return:
   respecting the vehicle's 500-mile range,
 - the total fuel cost and total gallons purchased for the trip.
 
-The routing/mapping side must use a free API, and — per the assignment's
-explicit constraint — the whole request should make close to one call to
+The routing/mapping side must use a free API, and per the assignment's
+explicit constraint the whole request should make close to one call to
 that external API (never one call per candidate station), even though the
 dataset behind it has ~6,600 unique US fuel stations (from ~8,150 raw CSV
 rows) to search over.
@@ -68,11 +68,11 @@ rows) to search over.
   its cumulative distance-from-origin, keeping only stations within
   `ROUTE_CORRIDOR_BUFFER_MILES` (2.0 mi) of the route.
 - **Fuel Stop Optimizer** (`fuelroute/services/fuel_optimizer.py`): pure
-  function over a 1-D list of (station, distance) pairs — no ORM, no I/O —
+  function over a 1-D list of (station, distance) pairs no ORM, no I/O —
   that returns the minimum-cost sequence of fuel purchases.
 - **Data access**: a single `FuelStation` Django model
   (`fuelroute/models.py`), populated once via the `import_fuel_prices`
-  management command. No repository layer and no async task queue —
+  management command. No repository layer and no async task queue
   deliberately kept simple per the project's scope. The only cache is
   Django's built-in one, holding geocoding results (see "Performance
   notes").
@@ -82,7 +82,7 @@ rows) to search over.
 | Choice | Why |
 |---|---|
 | Django 6.1 + DRF 3.18 | The assignment asks for the latest stable Django; 6.1.1 is the newest release as of this writing (`pyproject.toml` pins `django>=6.1,<6.2`), and DRF 3.18.1 officially supports it. DRF gives request validation (serializers) and clean JSON responses for a single-endpoint API without extra machinery. |
-| SQLite | ~8,000 rows, read-mostly, no concurrent-write concerns — Postgres/PostGIS would be pure overhead for this dataset size. See "Future improvements" for when that changes. |
+| SQLite | ~8,000 rows, read-mostly, no concurrent-write concerns    Postgres/PostGIS would be pure overhead for this dataset size. See "Future improvements" for when that changes. |
 | `uv` | Fast, reproducible dependency management with a committed lockfile (`uv.lock`); no need to hand-manage a virtualenv. |
 | OpenRouteService (ORS) | Free tier, no credit card required, returns geometry + distance + duration from a single directions call (see "Routing API choice" below). |
 | pytest + pytest-django | More ergonomic fixtures/parametrization than `unittest`/Django's test runner; `responses` mocks ORS's HTTP calls in tests without hitting the network. |
