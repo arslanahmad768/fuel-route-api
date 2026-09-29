@@ -10,18 +10,24 @@ anything about ORS or `requests`.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass
 
 import requests
 from django.conf import settings
+from django.core.cache import cache
 
-from fuelroute.constants import METERS_PER_MILE
+from fuelroute.constants import GEOCODE_CACHE_TIMEOUT_SECONDS, METERS_PER_MILE
 
 logger = logging.getLogger(__name__)
 
 ORS_BASE_URL = "https://api.openrouteservice.org"
 REQUEST_TIMEOUT_SECONDS = 10
+
+# Shared across calls so each request reuses an open HTTPS connection to ORS
+# instead of paying a fresh TCP + TLS handshake every time.
+_session = requests.Session()
 
 
 class RoutingError(Exception):
@@ -71,8 +77,19 @@ def _json_body(response: requests.Response, endpoint: str) -> dict:
     return data
 
 
+def _geocode_cache_key(query: str) -> str:
+    # Case and spacing don't change what ORS resolves, so they shouldn't
+    # split the cache; hashing keeps keys valid for any cache backend.
+    normalized = " ".join(query.split()).casefold()
+    return "ors:geocode:" + hashlib.sha256(normalized.encode()).hexdigest()
+
+
 def geocode(query: str) -> tuple[float, float]:
     """Resolve a free-text location to (latitude, longitude) via ORS.
+
+    Successful results are cached, so a repeated query returns the exact
+    coordinates ORS gave the first time without another network call.
+    Failures are never cached.
 
     Raises:
         LocationNotFound: the query matched zero locations (an empty
@@ -82,13 +99,25 @@ def geocode(query: str) -> tuple[float, float]:
             200 response whose body is malformed (not JSON, no `features`
             list, or a first feature without usable coordinates).
     """
+    cache_key = _geocode_cache_key(query)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        logger.info("ORS geocode cache hit for query=%r -> %s", query, cached)
+        return cached
+
+    coordinates = _request_geocode(query)
+    cache.set(cache_key, coordinates, GEOCODE_CACHE_TIMEOUT_SECONDS)
+    return coordinates
+
+
+def _request_geocode(query: str) -> tuple[float, float]:
     url = f"{ORS_BASE_URL}/geocode/search"
     params = {"text": query, "size": 1, "boundary.country": "US"}
 
     logger.info("Calling ORS geocode for query=%r", query)
 
     try:
-        response = requests.get(
+        response = _session.get(
             url,
             params=params,
             headers=_auth_headers(),
@@ -171,7 +200,7 @@ def get_route(
     logger.info("Calling ORS directions from %s to %s", start, finish)
 
     try:
-        response = requests.post(
+        response = _session.post(
             url,
             json=body,
             headers=_auth_headers(),

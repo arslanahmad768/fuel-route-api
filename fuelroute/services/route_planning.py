@@ -11,6 +11,7 @@ sequences the calls, and assembles the output shape.
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 
 from fuelroute.constants import ROUTE_CORRIDOR_BUFFER_MILES
@@ -18,6 +19,37 @@ from fuelroute.services import fuel_optimizer, route_matching, routing_client
 from fuelroute.services.routing_client import LocationNotFound
 
 logger = logging.getLogger(__name__)
+
+START_FIELDS = ("start_lat", "start_lng", "start")
+FINISH_FIELDS = ("finish_lat", "finish_lng", "finish")
+
+
+def _has_coordinates(request_data: dict, lat_field: str, lng_field: str) -> bool:
+    return request_data.get(lat_field) is not None and request_data.get(lng_field) is not None
+
+
+def _resolve_endpoints(
+    request_data: dict,
+) -> tuple[tuple[tuple[float, float], str], tuple[tuple[float, float], str]]:
+    """Resolve start and finish, geocoding both at once when both need it.
+
+    The two lookups are independent, so running them concurrently saves one
+    full ORS round trip. If both fail, the start's error is raised first,
+    matching what a caller would see from resolving them in order.
+    """
+    start_needs_geocoding = not _has_coordinates(request_data, *START_FIELDS[:2])
+    finish_needs_geocoding = not _has_coordinates(request_data, *FINISH_FIELDS[:2])
+
+    if start_needs_geocoding and finish_needs_geocoding:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            start_future = executor.submit(_resolve_endpoint, request_data, *START_FIELDS)
+            finish_future = executor.submit(_resolve_endpoint, request_data, *FINISH_FIELDS)
+            return start_future.result(), finish_future.result()
+
+    return (
+        _resolve_endpoint(request_data, *START_FIELDS),
+        _resolve_endpoint(request_data, *FINISH_FIELDS),
+    )
 
 
 def _resolve_endpoint(
@@ -28,9 +60,9 @@ def _resolve_endpoint(
     Coordinates take precedence over free text when both are given, per the
     spec. Skips geocoding entirely when coordinates are supplied.
     """
-    lat = request_data.get(lat_field)
-    lng = request_data.get(lng_field)
-    if lat is not None and lng is not None:
+    if _has_coordinates(request_data, lat_field, lng_field):
+        lat = request_data[lat_field]
+        lng = request_data[lng_field]
         label = f"{lat:.4f},{lng:.4f}"
         return (lat, lng), label
 
@@ -51,11 +83,8 @@ class RouteFuelPlanningService:
 
     @staticmethod
     def plan(request_data: dict) -> dict:
-        start_coords, start_label = _resolve_endpoint(
-            request_data, "start_lat", "start_lng", "start"
-        )
-        finish_coords, finish_label = _resolve_endpoint(
-            request_data, "finish_lat", "finish_lng", "finish"
+        (start_coords, start_label), (finish_coords, finish_label) = _resolve_endpoints(
+            request_data
         )
 
         route = routing_client.get_route(start_coords, finish_coords)

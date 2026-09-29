@@ -290,3 +290,96 @@ def test_get_route_summary_without_distance_means_zero():
 
     assert result.distance_miles == 0.0
     assert result.duration_hours == 0.0
+
+
+# --- Connection reuse and geocode caching -------------------------------------
+
+CHICAGO_GEOCODE_BODY = {
+    "features": [{"geometry": {"coordinates": [-87.6298, 41.8781]}}]
+}
+MINIMAL_ROUTE_BODY = {
+    "features": [
+        {
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [[-87.6298, 41.8781], [-96.7970, 32.7767]],
+            },
+            "properties": {"summary": {"distance": 160934.4, "duration": 7200}},
+        }
+    ]
+}
+
+
+def test_client_holds_one_shared_session():
+    from fuelroute.services import routing_client
+
+    assert isinstance(routing_client._session, requests.Session)
+
+
+@responses.activate
+def test_geocode_and_route_both_go_through_the_shared_session(monkeypatch):
+    from fuelroute.services import routing_client
+
+    methods_seen = []
+    real_request = routing_client._session.request
+
+    def spy(method, url, *args, **kwargs):
+        methods_seen.append(method)
+        return real_request(method, url, *args, **kwargs)
+
+    monkeypatch.setattr(routing_client._session, "request", spy)
+    responses.add(responses.GET, GEOCODE_URL, json=CHICAGO_GEOCODE_BODY, status=200)
+    responses.add(responses.POST, DIRECTIONS_URL, json=MINIMAL_ROUTE_BODY, status=200)
+
+    geocode("Chicago, IL")
+    get_route((41.8781, -87.6298), (32.7767, -96.7970))
+
+    assert methods_seen == ["GET", "POST"]
+
+
+@responses.activate
+def test_repeated_geocode_query_is_served_from_cache():
+    responses.add(responses.GET, GEOCODE_URL, json=CHICAGO_GEOCODE_BODY, status=200)
+
+    first = geocode("Chicago, IL")
+    second = geocode("Chicago, IL")
+
+    assert first == second == (41.8781, -87.6298)
+    assert len(responses.calls) == 1
+
+
+@responses.activate
+def test_geocode_cache_ignores_case_and_extra_whitespace():
+    responses.add(responses.GET, GEOCODE_URL, json=CHICAGO_GEOCODE_BODY, status=200)
+
+    geocode("Chicago, IL")
+    result = geocode("  chicago,   il ")
+
+    assert result == (41.8781, -87.6298)
+    assert len(responses.calls) == 1
+
+
+@responses.activate
+def test_geocode_cache_keeps_distinct_queries_separate():
+    responses.add(responses.GET, GEOCODE_URL, json=CHICAGO_GEOCODE_BODY, status=200)
+    responses.add(
+        responses.GET,
+        GEOCODE_URL,
+        json={"features": [{"geometry": {"coordinates": [-95.3698, 29.7604]}}]},
+        status=200,
+    )
+
+    assert geocode("Chicago, IL") == (41.8781, -87.6298)
+    assert geocode("Houston, TX") == (29.7604, -95.3698)
+    assert len(responses.calls) == 2
+
+
+@responses.activate
+def test_failed_geocode_is_not_cached():
+    responses.add(responses.GET, GEOCODE_URL, json={"features": []}, status=200)
+    responses.add(responses.GET, GEOCODE_URL, json=CHICAGO_GEOCODE_BODY, status=200)
+
+    with pytest.raises(LocationNotFound):
+        geocode("Chicago, IL")
+    assert geocode("Chicago, IL") == (41.8781, -87.6298)
+    assert len(responses.calls) == 2

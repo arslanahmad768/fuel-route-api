@@ -146,6 +146,19 @@ STATIC_URL = 'static/'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 
+# Cache (holds geocoding results so repeated locations skip the ORS call).
+# In-process memory needs no extra service; swap the backend for Redis or
+# Memcached when running several server processes.
+# https://docs.djangoproject.com/en/6.1/topics/cache/
+
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        'LOCATION': 'fuelroute',
+    }
+}
+
+
 # Logging
 # https://docs.djangoproject.com/en/6.1/topics/logging/
 
