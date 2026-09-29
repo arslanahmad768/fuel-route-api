@@ -3,11 +3,8 @@ Serializers for the fuel route optimization API.
 
 `RouteRequestSerializer` validates the two accepted request shapes (free-text
 `start`/`finish`, or explicit `start_lat`/`start_lng`/`finish_lat`/
-`finish_lng` coordinates). `FuelStopSerializer`/`RouteResponseSerializer`
-document and validate the exact response shape of the API contract; the
-view constructs the response as a plain dict from
-`RouteFuelPlanningService.plan()` and these serializers exist for output
-shape documentation/validation.
+`finish_lng` coordinates). The response is built as a plain dict by
+`RouteFuelPlanningService.plan()`.
 """
 
 from __future__ import annotations
@@ -38,23 +35,3 @@ class RouteRequestSerializer(serializers.Serializer):
             )
         return data
 
-
-class FuelStopSerializer(serializers.Serializer):
-    station_name = serializers.CharField()
-    city = serializers.CharField()
-    state = serializers.CharField()
-    distance_from_origin_miles = serializers.FloatField()
-    price_per_gallon = serializers.FloatField()
-    gallons_purchased = serializers.FloatField()
-    cost = serializers.FloatField()
-
-
-class RouteResponseSerializer(serializers.Serializer):
-    start = serializers.CharField()
-    finish = serializers.CharField()
-    distance_miles = serializers.FloatField()
-    duration_hours = serializers.FloatField()
-    route_geometry = serializers.DictField()
-    fuel_stops = FuelStopSerializer(many=True)
-    total_fuel_cost = serializers.FloatField()
-    total_gallons = serializers.FloatField()
