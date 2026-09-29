@@ -17,8 +17,9 @@ lat/lng coordinates), return:
 
 The routing/mapping side must use a free API, and — per the assignment's
 explicit constraint — the whole request should make close to one call to
-that external API (never one call per candidate station), since the
-optimization itself has to run over ~8,000 candidate fuel stations.
+that external API (never one call per candidate station), even though the
+dataset behind it has ~6,600 unique US fuel stations (from ~8,150 raw CSV
+rows) to search over.
 
 ## Architecture
 
@@ -71,8 +72,10 @@ optimization itself has to run over ~8,000 candidate fuel stations.
   that returns the minimum-cost sequence of fuel purchases.
 - **Data access**: a single `FuelStation` Django model
   (`fuelroute/models.py`), populated once via the `import_fuel_prices`
-  management command. No repository layer, no caching layer, no async task
-  queue — deliberately kept simple per the project's scope.
+  management command. No repository layer and no async task queue —
+  deliberately kept simple per the project's scope. The only cache is
+  Django's built-in one, holding geocoding results (see "Performance
+  notes").
 
 ## Tech choices
 
@@ -250,9 +253,10 @@ were given.
 uv run pytest
 ```
 
-89 tests currently pass, covering settings loading, the model, the import
+100 tests currently pass, covering settings loading, the model, the import
 command, the routing client (via `responses`-mocked HTTP, including
-malformed 200 responses), route corridor matching (including exact
+malformed 200 responses, connection reuse, and geocode caching), concurrent
+start/finish geocoding, route corridor matching (including exact
 equivalence with a brute-force scan and a dense-polyline speed guard), the
 fuel optimizer (including the four hand-worked counterexamples that pinned
 down the algorithm's edge cases), the API view, and end-to-end error
@@ -320,7 +324,7 @@ The short version:
 - **A station counts as "on route"** if it's within 2.0 miles of the
   route's polyline (`ROUTE_CORRIDOR_BUFFER_MILES`).
 - Constants: 500-mile range, 10 MPG, single Django app (`fuelroute`), SQLite,
-  no repository/factory/caching/async layers.
+  no repository/factory/async layers.
 
 ## Routing API choice & call budget
 
@@ -332,7 +336,10 @@ distance, and duration in a single response — meeting the assignment's
 Per request, the routing client makes:
 - **0 or up to 2 geocoding calls** — only when the request supplies
   free-text `start`/`finish` instead of coordinates (one call per endpoint
-  that needs resolving; supplying coordinates skips this entirely).
+  that needs resolving; supplying coordinates skips this entirely). When
+  both endpoints need geocoding, the two calls run concurrently, and a
+  location that was already looked up is answered from the cache with no
+  call at all.
 - **Exactly 1 directions call** — always, regardless of how many candidate
   fuel stations exist along the route.
 
@@ -359,8 +366,23 @@ by construction.
   2 s.
 - The whole per-request pipeline (routing call aside) is in-memory list/dict
   work — no N+1 query patterns, no per-station database round-trips.
-- The dominant cost per request is the single ORS directions HTTP call
-  (network-bound, not computation-bound).
+- Response time is dominated by ORS network round trips, not computation,
+  so the routing client keeps them to a minimum without changing any
+  result:
+  - **One shared HTTPS connection** (`requests.Session`) is reused across
+    calls, instead of a new TCP + TLS handshake per call.
+  - **Start and finish are geocoded concurrently**, so a free-text request
+    waits for one geocoding round trip instead of two.
+  - **Geocoding results are cached** with Django's cache framework
+    (in-process memory by default, 7-day expiry; failures are never
+    cached). A repeated location returns the exact coordinates ORS gave the
+    first time. Cache keys ignore case and extra spaces, so `"Chicago, IL"`
+    and `"chicago,  il"` share one entry.
+- Net effect: a free-text request costs one geocoding round trip plus the
+  directions call; once its locations are cached (or when coordinates are
+  sent), only the directions call remains. Replaying a recorded real
+  Chicago→Houston route through the old and new code produced
+  byte-identical responses.
 
 ## Known limitations
 
@@ -375,9 +397,11 @@ by construction.
 - **Non-US rows excluded**: Canadian stations (620 rows) are dropped
   entirely at import and can never appear in a route's fuel stops, even for
   a route that plausibly crosses the border.
-- **No caching**: every request re-runs corridor matching and optimization
-  from scratch, and re-calls ORS for routing/geocoding — there's no
-  memoization of repeated start/finish pairs.
+- **Only geocoding is cached**: every request still calls ORS for
+  directions and re-runs corridor matching and optimization, so fuel prices
+  from a fresh import are never served stale. The default in-memory cache is
+  per server process; a deployment with several processes should point
+  `CACHES` at a shared backend such as Redis.
 
 ## Future improvements
 
@@ -386,9 +410,9 @@ by construction.
   queries instead of Python loops over ORM-fetched rows — a meaningful win
   once the station count or route length grows well past this dataset's
   scale.
-- **Caching**: memoizing geocoding results (most free-text queries repeat
-  city names) and/or caching full route responses for identical start/finish
-  pairs would cut both ORS calls and recomputation for repeat traffic.
+- **Shared cache**: moving `CACHES` to Redis would let every server process
+  share geocoding results; caching directions results for repeated
+  start/finish pairs would remove the last ORS call for repeat traffic.
 - **Street-level geocoding**: if a richer address dataset became available,
   station-level (not city-level) coordinates would tighten the corridor
   match and stop-distance accuracy.
