@@ -163,42 +163,34 @@ curl -X POST http://localhost:8000/api/v1/route/ \
   -d '{"start": "Atlanta, GA", "finish": "Washington, DC"}'
 ```
 
-Where this response comes from: it was produced by running the real
-`RouteFuelPlanningService` pipeline (real corridor matching, real optimizer)
-against the real imported `FuelStation` table, with only the ORS directions
-call swapped for a simplified stand-in route — a ~600-point polyline through
-Atlanta → Charlotte → Raleigh → Richmond → Washington (distance = that
-polyline's own length; duration assumes 60 mph). A live ORS road route
-between the same cities is longer and follows different roads, so a live
-call will return different stations and numbers. The only edit to the
-output is that `route_geometry.coordinates` is cut down to its two
-endpoints (a real response has one pair per polyline point, typically
-thousands). Every other number is as computed, and they are consistent with
-each other (worked through below).
+This is the response from a live request against OpenRouteService and the
+real imported station data. Only `route_geometry.coordinates` is abridged:
+it shows two of the route's 5,653 points, and the real response lists every
+point along the road.
 
 ```json
 {
   "start": "Atlanta, GA",
   "finish": "Washington, DC",
-  "distance_miles": 591.6,
-  "duration_hours": 9.9,
+  "distance_miles": 645.5,
+  "duration_hours": 11.1,
   "route_geometry": {
     "type": "LineString",
-    "coordinates": [[-84.388, 33.749], [-77.0369, 38.9072]]
+    "coordinates": [[-84.4146, 33.7698], [-77.0171, 38.8265]]
   },
   "fuel_stops": [
     {
-      "station_name": "SPEEDWAY #6973",
-      "city": "Wake Forest",
+      "station_name": "Sheetz #838",
+      "city": "Salisbury",
       "state": "NC",
-      "distance_from_origin_miles": 371.5,
-      "price_per_gallon": 2.949,
-      "gallons_purchased": 9.16,
-      "cost": 27.01
+      "distance_from_origin_miles": 280.6,
+      "price_per_gallon": 2.859,
+      "gallons_purchased": 14.55,
+      "cost": 41.6
     }
   ],
-  "total_fuel_cost": 27.01,
-  "total_gallons": 9.16
+  "total_fuel_cost": 41.6,
+  "total_gallons": 14.55
 }
 ```
 
@@ -206,18 +198,18 @@ The arithmetic, under the fuel model (starts with a full 500-mile tank,
 10 MPG, no reserve needed at the destination):
 
 ```text
-Trip length 591.6 mi > 500 mi range, so at least (591.6 - 500) = 91.6 mi
+Trip length 645.5 mi > 500 mi range, so at least (645.5 - 500) = 145.5 mi
 of fuel must be bought en route. Here one stop covers all of it:
 
-Stop at mile 371.5 (Wake Forest, NC; $2.949/gal):
-  reachable on the starting tank:  371.5 <= 500
-  fuel on arrival:                 500 - 371.5   = 128.5 mi
-  still to drive:                  591.6 - 371.5 = 220.1 mi  (<= 500, so no second stop)
-  buy the shortfall only:          220.1 - 128.5 = 91.6 mi = 91.6 / 10 = 9.16 gal
-  cost:                            9.16 x 2.949  = 27.01284 -> $27.01 (to the cent, half-up)
+Stop at mile 280.6 (Salisbury, NC; $2.859/gal):
+  reachable on the starting tank:  280.6 <= 500
+  fuel on arrival:                 500 - 280.6   = 219.4 mi
+  still to drive:                  645.5 - 280.6 = 364.9 mi  (<= 500, so no second stop)
+  buy the shortfall only:          364.9 - 219.4 = 145.5 mi = 145.5 / 10 = 14.55 gal
+  cost:                            14.55 x 2.859 = 41.59845 -> $41.60 (to the cent, half-up)
 
-total_gallons   = 9.16   (= (591.6 - 500) / 10)
-total_fuel_cost = 27.01  (single stop)
+total_gallons   = 14.55  (= (645.5 - 500) / 10)
+total_fuel_cost = 41.60  (single stop)
 ```
 
 Why only a top-up and not a full tank: nothing reachable further along the
